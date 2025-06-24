@@ -1,6 +1,6 @@
 ---
-description:
-globs:
+description: 
+globs: 
 alwaysApply: false
 ---
 # Agent Management System Architecture
@@ -287,3 +287,4 @@ class MultiSystemAgentManager:
 3. Add system-specific configuration management
 4. Implement agent replication and synchronization
 5. Add cross-system conversation routing
+

@@ -1,6 +1,6 @@
 ---
-description:
-globs:
+description: 
+globs: 
 alwaysApply: false
 ---
 # Python Backend Development Patterns
@@ -449,3 +449,4 @@ async def get_metrics():
         data=metrics
     )
 ```
+

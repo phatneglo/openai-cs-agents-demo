@@ -1,6 +1,6 @@
 ---
-description:
-globs:
+description: 
+globs: 
 alwaysApply: false
 ---
 # Multi-System Deployment Patterns
@@ -982,3 +982,4 @@ spec:
             name: global-agent-manager-service
             port:
               number: 80
+
