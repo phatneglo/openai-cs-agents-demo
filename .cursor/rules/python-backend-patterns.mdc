@@ -1,0 +1,451 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Python Backend Development Patterns
+
+## FastAPI Application Structure
+
+### Main Application Setup
+```python
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional, List, Dict, Any
+import logging
+
+app = FastAPI(title="Agent Management System", version="1.0.0")
+
+# CORS configuration for frontend integration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+```
+
+### Pydantic Models for API
+```python
+# Base models for all API requests/responses
+class BaseResponse(BaseModel):
+    success: bool
+    message: str
+    data: Optional[Dict[str, Any]] = None
+
+class AgentConfig(BaseModel):
+    name: str
+    description: str
+    model: str = "gpt-4o-mini"
+    system_prompt: str
+    tools: List[str] = []
+    guardrails: List[str] = []
+    handoffs: List[str] = []
+    is_active: bool = True
+    metadata: Dict[str, Any] = {}
+
+class AgentConfigUpdate(BaseModel):
+    description: Optional[str] = None
+    system_prompt: Optional[str] = None
+    tools: Optional[List[str]] = None
+    guardrails: Optional[List[str]] = None
+    handoffs: Optional[List[str]] = None
+    is_active: Optional[bool] = None
+    metadata: Optional[Dict[str, Any]] = None
+```
+
+## Agent Registry Implementation
+
+### Core Registry Class
+```python
+from typing import Dict, List, Optional, Tuple
+from agents import Agent, Runner
+import asyncio
+
+class AgentRegistry:
+    def __init__(self):
+        self._agents: Dict[str, Agent] = {}
+        self._configs: Dict[str, AgentConfig] = {}
+        self._conversations: Dict[str, Dict[str, Any]] = {}
+    
+    def register_agent(self, name: str, agent: Agent, config: AgentConfig) -> bool:
+        """Register a new agent with validation."""
+        if name in self._agents:
+            raise ValueError(f"Agent '{name}' already exists")
+        
+        # Validate agent configuration
+        if not config.system_prompt.strip():
+            raise ValueError("System prompt cannot be empty")
+        
+        self._agents[name] = agent
+        self._configs[name] = config
+        logger.info(f"Registered agent: {name}")
+        return True
+    
+    def get_agent(self, name: str) -> Optional[Agent]:
+        """Get agent by name."""
+        return self._agents.get(name)
+    
+    def get_config(self, name: str) -> Optional[AgentConfig]:
+        """Get agent configuration by name."""
+        return self._configs.get(name)
+    
+    def list_agents(self) -> List[Dict[str, Any]]:
+        """List all registered agents with metadata."""
+        return [
+            {
+                "name": name,
+                "config": config.model_dump(),
+                "is_active": config.is_active,
+                "tools_count": len(config.tools),
+                "guardrails_count": len(config.guardrails)
+            }
+            for name, config in self._configs.items()
+        ]
+    
+    def remove_agent(self, name: str) -> bool:
+        """Remove agent from registry."""
+        if name not in self._agents:
+            return False
+        
+        # Check if agent is in use
+        active_conversations = [
+            conv_id for conv_id, conv in self._conversations.items()
+            if conv.get("current_agent") == name
+        ]
+        
+        if active_conversations:
+            raise ValueError(f"Cannot remove agent '{name}' - active in {len(active_conversations)} conversations")
+        
+        self._agents.pop(name)
+        self._configs.pop(name)
+        logger.info(f"Removed agent: {name}")
+        return True
+    
+    def update_agent(self, name: str, updates: AgentConfigUpdate) -> AgentConfig:
+        """Update agent configuration."""
+        if name not in self._configs:
+            raise ValueError(f"Agent '{name}' not found")
+        
+        config = self._configs[name]
+        update_data = updates.model_dump(exclude_unset=True)
+        
+        for field, value in update_data.items():
+            setattr(config, field, value)
+        
+        logger.info(f"Updated agent: {name}")
+        return config
+    
+    def get_active_agents(self) -> List[str]:
+        """Get list of active agent names."""
+        return [name for name, config in self._configs.items() if config.is_active]
+```
+
+## API Endpoints Implementation
+
+### Agent Management Endpoints
+```python
+from fastapi import APIRouter, HTTPException, Depends
+from typing import List
+
+router = APIRouter(prefix="/api/v1")
+
+# Global registry instance
+agent_registry = AgentRegistry()
+
+@router.post("/agents", response_model=BaseResponse)
+async def register_agent(config: AgentConfig):
+    """Register a new agent with the system."""
+    try:
+        # Create agent instance from config
+        agent = create_agent_from_config(config)
+        
+        # Register in registry
+        agent_registry.register_agent(config.name, agent, config)
+        
+        return BaseResponse(
+            success=True,
+            message=f"Agent '{config.name}' registered successfully",
+            data={"agent_name": config.name}
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error registering agent: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@router.get("/agents", response_model=BaseResponse)
+async def list_agents():
+    """List all registered agents."""
+    agents = agent_registry.list_agents()
+    return BaseResponse(
+        success=True,
+        message=f"Found {len(agents)} agents",
+        data={"agents": agents}
+    )
+
+@router.get("/agents/{agent_name}", response_model=BaseResponse)
+async def get_agent(agent_name: str):
+    """Get specific agent configuration."""
+    config = agent_registry.get_config(agent_name)
+    if not config:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
+    
+    return BaseResponse(
+        success=True,
+        message=f"Agent '{agent_name}' configuration",
+        data={"agent": config.model_dump()}
+    )
+
+@router.put("/agents/{agent_name}", response_model=BaseResponse)
+async def update_agent(agent_name: str, updates: AgentConfigUpdate):
+    """Update agent configuration."""
+    try:
+        config = agent_registry.update_agent(agent_name, updates)
+        return BaseResponse(
+            success=True,
+            message=f"Agent '{agent_name}' updated successfully",
+            data={"agent": config.model_dump()}
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.delete("/agents/{agent_name}", response_model=BaseResponse)
+async def remove_agent(agent_name: str):
+    """Remove agent from system."""
+    try:
+        success = agent_registry.remove_agent(agent_name)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
+        
+        return BaseResponse(
+            success=True,
+            message=f"Agent '{agent_name}' removed successfully"
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+```
+
+### Agent Factory Functions
+```python
+def create_agent_from_config(config: AgentConfig) -> Agent:
+    """Create an Agent instance from configuration."""
+    from agents import Agent, function_tool, input_guardrail
+    
+    # Dynamic tool creation
+    tools = []
+    for tool_name in config.tools:
+        tool = create_tool_by_name(tool_name)
+        if tool:
+            tools.append(tool)
+    
+    # Dynamic guardrail creation
+    guardrails = []
+    for guardrail_name in config.guardrails:
+        guardrail = create_guardrail_by_name(guardrail_name)
+        if guardrail:
+            guardrails.append(guardrail)
+    
+    # Create agent instructions function
+    def agent_instructions(run_context, agent):
+        return config.system_prompt
+    
+    # Create and return agent
+    return Agent(
+        model=config.model,
+        name=config.name,
+        instructions=agent_instructions,
+        tools=tools,
+        input_guardrails=guardrails
+    )
+
+def create_tool_by_name(tool_name: str):
+    """Create tool function by name."""
+    tool_registry = {
+        "faq_lookup": faq_lookup_tool,
+        "flight_status": flight_status_tool,
+        "baggage_info": baggage_tool,
+        "seat_update": update_seat,
+        "display_seat_map": display_seat_map,
+    }
+    return tool_registry.get(tool_name)
+
+def create_guardrail_by_name(guardrail_name: str):
+    """Create guardrail function by name."""
+    guardrail_registry = {
+        "relevance": relevance_guardrail,
+        "jailbreak": jailbreak_guardrail,
+    }
+    return guardrail_registry.get(guardrail_name)
+```
+
+## Conversation Management
+
+### Enhanced Conversation Store
+```python
+class ConversationManager:
+    def __init__(self):
+        self._conversations: Dict[str, Dict[str, Any]] = {}
+        self._agent_registry: AgentRegistry = None
+    
+    def set_agent_registry(self, registry: AgentRegistry):
+        """Set the agent registry for conversation management."""
+        self._agent_registry = registry
+    
+    def create_conversation(self, conversation_id: str, initial_agent: str = None) -> Dict[str, Any]:
+        """Create a new conversation."""
+        if not self._agent_registry:
+            raise RuntimeError("Agent registry not set")
+        
+        # Use triage agent as default
+        if not initial_agent:
+            active_agents = self._agent_registry.get_active_agents()
+            initial_agent = active_agents[0] if active_agents else "triage"
+        
+        conversation = {
+            "id": conversation_id,
+            "current_agent": initial_agent,
+            "messages": [],
+            "context": {},
+            "created_at": time.time(),
+            "updated_at": time.time()
+        }
+        
+        self._conversations[conversation_id] = conversation
+        return conversation
+    
+    def get_conversation(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+        """Get conversation by ID."""
+        return self._conversations.get(conversation_id)
+    
+    def update_conversation(self, conversation_id: str, updates: Dict[str, Any]):
+        """Update conversation state."""
+        if conversation_id in self._conversations:
+            self._conversations[conversation_id].update(updates)
+            self._conversations[conversation_id]["updated_at"] = time.time()
+    
+    def add_message(self, conversation_id: str, message: Dict[str, Any]):
+        """Add message to conversation."""
+        if conversation_id in self._conversations:
+            self._conversations[conversation_id]["messages"].append(message)
+            self._conversations[conversation_id]["updated_at"] = time.time()
+    
+    def list_conversations(self) -> List[Dict[str, Any]]:
+        """List all conversations with metadata."""
+        return [
+            {
+                "id": conv_id,
+                "current_agent": conv["current_agent"],
+                "message_count": len(conv["messages"]),
+                "created_at": conv["created_at"],
+                "updated_at": conv["updated_at"]
+            }
+            for conv_id, conv in self._conversations.items()
+        ]
+```
+
+## Error Handling and Validation
+
+### Custom Exceptions
+```python
+class AgentManagementError(Exception):
+    """Base exception for agent management errors."""
+    pass
+
+class AgentNotFoundError(AgentManagementError):
+    """Raised when agent is not found."""
+    pass
+
+class AgentInUseError(AgentManagementError):
+    """Raised when trying to remove agent that is in use."""
+    pass
+
+class InvalidAgentConfigError(AgentManagementError):
+    """Raised when agent configuration is invalid."""
+    pass
+```
+
+### Validation Functions
+```python
+def validate_agent_config(config: AgentConfig) -> List[str]:
+    """Validate agent configuration and return list of errors."""
+    errors = []
+    
+    if not config.name.strip():
+        errors.append("Agent name cannot be empty")
+    
+    if not config.system_prompt.strip():
+        errors.append("System prompt cannot be empty")
+    
+    if len(config.name) > 50:
+        errors.append("Agent name must be 50 characters or less")
+    
+    # Validate model name
+    valid_models = ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]
+    if config.model not in valid_models:
+        errors.append(f"Model must be one of: {', '.join(valid_models)}")
+    
+    return errors
+
+def validate_agent_name(name: str) -> bool:
+    """Validate agent name format."""
+    import re
+    # Allow alphanumeric, hyphens, and underscores
+    pattern = r'^[a-zA-Z0-9_-]+$'
+    return bool(re.match(pattern, name)) and len(name) <= 50
+```
+
+## Health Check and Monitoring
+
+### Health Check Endpoints
+```python
+@router.get("/health", response_model=BaseResponse)
+async def health_check():
+    """Health check endpoint."""
+    try:
+        # Check agent registry
+        agent_count = len(agent_registry.list_agents())
+        
+        # Check conversation manager
+        conversation_count = len(conversation_manager.list_conversations())
+        
+        return BaseResponse(
+            success=True,
+            message="System healthy",
+            data={
+                "status": "healthy",
+                "agents_count": agent_count,
+                "conversations_count": conversation_count,
+                "timestamp": time.time()
+            }
+        )
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        raise HTTPException(status_code=503, detail="System unhealthy")
+
+@router.get("/metrics", response_model=BaseResponse)
+async def get_metrics():
+    """Get system metrics."""
+    agents = agent_registry.list_agents()
+    conversations = conversation_manager.list_conversations()
+    
+    metrics = {
+        "total_agents": len(agents),
+        "active_agents": len([a for a in agents if a["is_active"]]),
+        "total_conversations": len(conversations),
+        "active_conversations": len([c for c in conversations if time.time() - c["updated_at"] < 3600]),
+        "system_uptime": time.time() - start_time
+    }
+    
+    return BaseResponse(
+        success=True,
+        message="System metrics",
+        data=metrics
+    )
+```

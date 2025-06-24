@@ -1,0 +1,289 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Agent Management System Architecture
+
+## Core Principles
+
+- **Modular Agent Design**: Each agent should be self-contained with clear responsibilities
+- **Dynamic Registration**: Agents can be added/removed at runtime without system restart
+- **Context Sharing**: Agents share conversation context through a common data model
+- **Guardrail Integration**: All agents should have configurable safety guardrails
+- **Tool Standardization**: Use consistent patterns for agent tools and functions
+
+## Python Backend Patterns
+
+### Agent Definition Structure
+```python
+# Always follow this pattern for new agents
+def agent_instructions(
+    run_context: RunContextWrapper[SharedContext], 
+    agent: Agent[SharedContext]
+) -> str:
+    return f"""
+    {RECOMMENDED_PROMPT_PREFIX}
+    You are a [AGENT_TYPE] agent. [SPECIFIC_INSTRUCTIONS]
+    
+    Available tools: {[tool.name for tool in agent.tools]}
+    Current context: {run_context.context}
+    """
+
+agent_name = Agent[SharedContext](
+    model="gpt-4o-mini",
+    name="[AGENT_NAME]",
+    instructions=agent_instructions,
+    tools=[tool1, tool2, tool3],
+    input_guardrails=[relevance_guardrail, jailbreak_guardrail],
+    handoffs=[handoff_to_agent1, handoff_to_agent2]
+)
+```
+
+### Context Management
+- Use Pydantic BaseModel for all context classes
+- Include factory functions for context creation
+- Always validate context data before agent execution
+- Share context across all agents in a conversation
+
+### Tool Development
+```python
+@function_tool(
+    name_override="tool_name",
+    description_override="Clear description of what the tool does"
+)
+async def tool_function(
+    context: RunContextWrapper[SharedContext], 
+    param1: str, 
+    param2: int
+) -> str:
+    """Tool docstring explaining functionality and return format."""
+    # Tool implementation
+    return "Tool result"
+```
+
+### Guardrail Implementation
+```python
+class GuardrailOutput(BaseModel):
+    reasoning: str
+    is_safe: bool
+
+guardrail_agent = Agent(
+    model="gpt-4o-mini",
+    name="Guardrail Name",
+    instructions="Specific guardrail instructions",
+    output_type=GuardrailOutput,
+)
+
+@input_guardrail(name="Guardrail Name")
+async def guardrail_function(
+    context: RunContextWrapper[None], 
+    agent: Agent, 
+    input: str | list[TResponseInputItem]
+) -> GuardrailFunctionOutput:
+    result = await Runner.run(guardrail_agent, input, context=context.context)
+    final = result.final_output_as(GuardrailOutput)
+    return GuardrailFunctionOutput(
+        output_info=final, 
+        tripwire_triggered=not final.is_safe
+    )
+```
+
+## Frontend Patterns
+
+### Agent Management Components
+```typescript
+// Agent configuration interface
+interface AgentConfig {
+  name: string;
+  description: string;
+  model: string;
+  tools: string[];
+  guardrails: string[];
+  handoffs: string[];
+  isActive: boolean;
+  systemPrompt: string;
+}
+
+// Agent management hooks
+const useAgentManager = () => {
+  const [agents, setAgents] = useState<AgentConfig[]>([]);
+  
+  const addAgent = async (config: AgentConfig) => {
+    // API call to register new agent
+  };
+  
+  const removeAgent = async (agentName: string) => {
+    // API call to unregister agent
+  };
+  
+  const updateAgent = async (agentName: string, config: Partial<AgentConfig>) => {
+    // API call to update agent configuration
+  };
+  
+  return { agents, addAgent, removeAgent, updateAgent };
+};
+```
+
+### Dynamic Agent UI
+```typescript
+// Agent configuration form
+const AgentConfigForm = ({ agent, onSave }: AgentConfigFormProps) => {
+  const [config, setConfig] = useState<AgentConfig>(agent);
+  
+  return (
+    <form onSubmit={handleSubmit}>
+      <Input 
+        label="Agent Name" 
+        value={config.name} 
+        onChange={(name) => setConfig({...config, name})} 
+      />
+      <Textarea 
+        label="System Prompt" 
+        value={config.systemPrompt} 
+        onChange={(systemPrompt) => setConfig({...config, systemPrompt})} 
+      />
+      <MultiSelect 
+        label="Available Tools" 
+        options={availableTools} 
+        value={config.tools} 
+        onChange={(tools) => setConfig({...config, tools})} 
+      />
+      <MultiSelect 
+        label="Guardrails" 
+        options={availableGuardrails} 
+        value={config.guardrails} 
+        onChange={(guardrails) => setConfig({...config, guardrails})} 
+      />
+    </form>
+  );
+};
+```
+
+## API Design Patterns
+
+### Agent Management Endpoints
+```python
+# Agent registration endpoint
+@app.post("/agents/register")
+async def register_agent(agent_config: AgentConfig):
+    """Register a new agent with the system."""
+    # Validate agent configuration
+    # Register agent in agent registry
+    # Return agent metadata
+
+# Agent removal endpoint  
+@app.delete("/agents/{agent_name}")
+async def remove_agent(agent_name: str):
+    """Remove an agent from the system."""
+    # Validate agent exists
+    # Remove from registry
+    # Clean up any resources
+
+# Agent update endpoint
+@app.put("/agents/{agent_name}")
+async def update_agent(agent_name: str, updates: AgentConfigUpdate):
+    """Update agent configuration."""
+    # Validate updates
+    # Apply changes
+    # Return updated configuration
+```
+
+### Dynamic Agent Registry
+```python
+class AgentRegistry:
+    def __init__(self):
+        self._agents: Dict[str, Agent] = {}
+        self._configs: Dict[str, AgentConfig] = {}
+    
+    def register_agent(self, name: str, agent: Agent, config: AgentConfig):
+        """Register a new agent."""
+        self._agents[name] = agent
+        self._configs[name] = config
+    
+    def get_agent(self, name: str) -> Optional[Agent]:
+        """Get agent by name."""
+        return self._agents.get(name)
+    
+    def list_agents(self) -> List[str]:
+        """List all registered agent names."""
+        return list(self._agents.keys())
+    
+    def remove_agent(self, name: str):
+        """Remove agent from registry."""
+        self._agents.pop(name, None)
+        self._configs.pop(name, None)
+```
+
+## System Integration Patterns
+
+### Cross-System Agent Deployment
+```python
+# Agent deployment configuration
+class DeploymentConfig(BaseModel):
+    system_id: str
+    agent_name: str
+    environment: str  # "production", "staging", "development"
+    resources: Dict[str, Any]  # CPU, memory, etc.
+    dependencies: List[str]  # Other agents this depends on
+
+# Multi-system agent manager
+class MultiSystemAgentManager:
+    def __init__(self):
+        self.systems: Dict[str, AgentRegistry] = {}
+    
+    def deploy_agent(self, system_id: str, agent: Agent, config: DeploymentConfig):
+        """Deploy agent to specific system."""
+        if system_id not in self.systems:
+            self.systems[system_id] = AgentRegistry()
+        
+        self.systems[system_id].register_agent(agent.name, agent, config)
+    
+    def get_agent_across_systems(self, agent_name: str) -> List[Tuple[str, Agent]]:
+        """Find agent across all systems."""
+        results = []
+        for system_id, registry in self.systems.items():
+            agent = registry.get_agent(agent_name)
+            if agent:
+                results.append((system_id, agent))
+        return results
+```
+
+## Best Practices
+
+### Agent Development
+1. **Single Responsibility**: Each agent should have one clear purpose
+2. **Context Awareness**: Agents should understand and update shared context
+3. **Error Handling**: Implement proper error handling and fallback mechanisms
+4. **Logging**: Comprehensive logging for debugging and monitoring
+5. **Testing**: Unit tests for each agent and integration tests for workflows
+
+### System Management
+1. **Configuration Management**: Use environment variables and config files
+2. **Health Checks**: Implement health check endpoints for all agents
+3. **Monitoring**: Track agent performance, errors, and usage metrics
+4. **Backup/Restore**: Implement conversation state backup and restore
+5. **Security**: Validate all inputs and implement proper authentication
+
+### UI/UX Guidelines
+1. **Real-time Updates**: Show agent status and conversation flow in real-time
+2. **Configuration UI**: Provide intuitive interfaces for agent management
+3. **Debugging Tools**: Include tools for testing and debugging agents
+4. **Documentation**: Inline help and documentation for agent configuration
+5. **Responsive Design**: Ensure UI works across different screen sizes
+
+## Migration Patterns
+
+### From Static to Dynamic
+1. Extract agent configurations to external files
+2. Implement agent registry and management APIs
+3. Create UI for agent configuration
+4. Add runtime agent registration capabilities
+5. Implement agent versioning and rollback
+
+### Multi-System Deployment
+1. Implement system identification and routing
+2. Create cross-system agent discovery
+3. Add system-specific configuration management
+4. Implement agent replication and synchronization
+5. Add cross-system conversation routing

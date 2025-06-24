@@ -1,0 +1,984 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Multi-System Deployment Patterns
+
+## System Architecture Overview
+
+### Distributed Agent Management
+```python
+# Multi-system agent orchestration
+class MultiSystemAgentManager:
+    def __init__(self):
+        self.systems: Dict[str, SystemRegistry] = {}
+        self.global_registry: GlobalAgentRegistry = GlobalAgentRegistry()
+        self.load_balancer: LoadBalancer = LoadBalancer()
+    
+    def register_system(self, system_id: str, system_config: SystemConfig):
+        """Register a new system with the global manager."""
+        self.systems[system_id] = SystemRegistry(system_config)
+        self.global_registry.add_system(system_id, system_config)
+    
+    def deploy_agent_across_systems(self, agent_config: AgentConfig, target_systems: List[str]):
+        """Deploy an agent to multiple systems."""
+        deployed_agents = []
+        for system_id in target_systems:
+            if system_id in self.systems:
+                agent = self.systems[system_id].deploy_agent(agent_config)
+                deployed_agents.append((system_id, agent))
+        return deployed_agents
+    
+    def route_conversation(self, conversation_id: str, user_message: str) -> str:
+        """Route conversation to the best available system."""
+        return self.load_balancer.select_system(conversation_id, user_message)
+```
+
+## System Configuration Management
+
+### System Configuration Schema
+```python
+from pydantic import BaseModel
+from typing import Dict, List, Optional, Any
+from enum import Enum
+
+class SystemEnvironment(str, Enum):
+    PRODUCTION = "production"
+    STAGING = "staging"
+    DEVELOPMENT = "development"
+    TESTING = "testing"
+
+class SystemCapabilities(BaseModel):
+    max_concurrent_conversations: int = 100
+    supported_models: List[str] = ["gpt-4o-mini", "gpt-4o"]
+    available_tools: List[str] = []
+    available_guardrails: List[str] = []
+    max_agents_per_system: int = 50
+
+class SystemConfig(BaseModel):
+    system_id: str
+    name: str
+    environment: SystemEnvironment
+    base_url: str
+    api_key: str
+    capabilities: SystemCapabilities
+    region: str
+    timezone: str
+    metadata: Dict[str, Any] = {}
+    is_active: bool = True
+    priority: int = 1  # Lower number = higher priority
+    health_check_url: Optional[str] = None
+    max_response_time_ms: int = 5000
+```
+
+### Configuration Management
+```python
+import yaml
+import json
+from pathlib import Path
+
+class ConfigurationManager:
+    def __init__(self, config_dir: str = "configs"):
+        self.config_dir = Path(config_dir)
+        self.config_dir.mkdir(exist_ok=True)
+    
+    def save_system_config(self, system_id: str, config: SystemConfig):
+        """Save system configuration to file."""
+        config_file = self.config_dir / f"{system_id}.yaml"
+        with open(config_file, 'w') as f:
+            yaml.dump(config.model_dump(), f, default_flow_style=False)
+    
+    def load_system_config(self, system_id: str) -> Optional[SystemConfig]:
+        """Load system configuration from file."""
+        config_file = self.config_dir / f"{system_id}.yaml"
+        if config_file.exists():
+            with open(config_file, 'r') as f:
+                config_data = yaml.safe_load(f)
+                return SystemConfig(**config_data)
+        return None
+    
+    def list_system_configs(self) -> List[str]:
+        """List all available system configurations."""
+        return [f.stem for f in self.config_dir.glob("*.yaml")]
+    
+    def deploy_configuration(self, system_id: str, target_systems: List[str]):
+        """Deploy configuration to multiple systems."""
+        config = self.load_system_config(system_id)
+        if not config:
+            raise ValueError(f"Configuration for system {system_id} not found")
+        
+        deployment_results = []
+        for target_system in target_systems:
+            try:
+                # Update target system configuration
+                target_config = config.model_copy()
+                target_config.system_id = target_system
+                self.save_system_config(target_system, target_config)
+                deployment_results.append({
+                    "system": target_system,
+                    "status": "success",
+                    "message": "Configuration deployed successfully"
+                })
+            except Exception as e:
+                deployment_results.append({
+                    "system": target_system,
+                    "status": "error",
+                    "message": str(e)
+                })
+        
+        return deployment_results
+```
+
+## Cross-System Communication
+
+### Inter-System API Client
+```python
+import aiohttp
+import asyncio
+from typing import Dict, Any, Optional
+
+class InterSystemClient:
+    def __init__(self):
+        self.session: Optional[aiohttp.ClientSession] = None
+        self.timeout = aiohttp.ClientTimeout(total=30)
+    
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession(timeout=self.timeout)
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.session:
+            await self.session.close()
+    
+    async def health_check(self, system_url: str) -> Dict[str, Any]:
+        """Check health of a remote system."""
+        if not self.session:
+            raise RuntimeError("Client not initialized")
+        
+        try:
+            async with self.session.get(f"{system_url}/health") as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return {
+                        "status": "healthy",
+                        "response_time": response.headers.get("X-Response-Time"),
+                        "data": data
+                    }
+                else:
+                    return {
+                        "status": "unhealthy",
+                        "status_code": response.status,
+                        "error": f"HTTP {response.status}"
+                    }
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+    
+    async def deploy_agent(self, system_url: str, agent_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy agent to remote system."""
+        if not self.session:
+            raise RuntimeError("Client not initialized")
+        
+        try:
+            async with self.session.post(
+                f"{system_url}/api/v1/agents",
+                json=agent_config
+            ) as response:
+                data = await response.json()
+                return {
+                    "success": response.status == 200,
+                    "status_code": response.status,
+                    "data": data
+                }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    async def sync_conversation(self, system_url: str, conversation_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Sync conversation data between systems."""
+        if not self.session:
+            raise RuntimeError("Client not initialized")
+        
+        try:
+            async with self.session.post(
+                f"{system_url}/api/v1/conversations/{conversation_id}/sync",
+                json=data
+            ) as response:
+                data = await response.json()
+                return {
+                    "success": response.status == 200,
+                    "status_code": response.status,
+                    "data": data
+                }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+```
+
+## Load Balancing and Routing
+
+### Intelligent Load Balancer
+```python
+import hashlib
+import time
+from typing import List, Dict, Any
+
+class LoadBalancer:
+    def __init__(self):
+        self.systems: Dict[str, SystemInfo] = {}
+        self.routing_strategy: str = "round_robin"  # round_robin, least_connections, weighted, geo_based
+    
+    def add_system(self, system_id: str, system_info: SystemInfo):
+        """Add system to load balancer."""
+        self.systems[system_id] = system_info
+    
+    def select_system(self, conversation_id: str, user_message: str = "") -> str:
+        """Select the best system for a conversation."""
+        available_systems = [
+            sid for sid, info in self.systems.items()
+            if info.is_healthy and info.is_active
+        ]
+        
+        if not available_systems:
+            raise RuntimeError("No healthy systems available")
+        
+        if self.routing_strategy == "round_robin":
+            return self._round_robin_select(available_systems)
+        elif self.routing_strategy == "least_connections":
+            return self._least_connections_select(available_systems)
+        elif self.routing_strategy == "weighted":
+            return self._weighted_select(available_systems)
+        elif self.routing_strategy == "geo_based":
+            return self._geo_based_select(available_systems, user_message)
+        else:
+            return self._hash_based_select(available_systems, conversation_id)
+    
+    def _round_robin_select(self, available_systems: List[str]) -> str:
+        """Round-robin selection."""
+        # Simple round-robin implementation
+        current_index = int(time.time() * 1000) % len(available_systems)
+        return available_systems[current_index]
+    
+    def _least_connections_select(self, available_systems: List[str]) -> str:
+        """Select system with least active connections."""
+        return min(
+            available_systems,
+            key=lambda sid: self.systems[sid].active_connections
+        )
+    
+    def _weighted_select(self, available_systems: List[str]) -> str:
+        """Weighted selection based on system priority."""
+        total_weight = sum(self.systems[sid].priority for sid in available_systems)
+        random_value = time.time() * 1000 % total_weight
+        
+        current_weight = 0
+        for sid in available_systems:
+            current_weight += self.systems[sid].priority
+            if random_value <= current_weight:
+                return sid
+        
+        return available_systems[-1]
+    
+    def _geo_based_select(self, available_systems: List[str], user_message: str) -> str:
+        """Select system based on geographic location."""
+        # Simple implementation - could be enhanced with IP geolocation
+        # For now, just use round-robin
+        return self._round_robin_select(available_systems)
+    
+    def _hash_based_select(self, available_systems: List[str], conversation_id: str) -> str:
+        """Select system based on conversation ID hash."""
+        hash_value = int(hashlib.md5(conversation_id.encode()).hexdigest(), 16)
+        return available_systems[hash_value % len(available_systems)]
+
+class SystemInfo:
+    def __init__(self, system_id: str, config: SystemConfig):
+        self.system_id = system_id
+        self.config = config
+        self.is_healthy = True
+        self.is_active = config.is_active
+        self.active_connections = 0
+        self.last_health_check = time.time()
+        self.response_times: List[float] = []
+        self.error_count = 0
+        self.success_count = 0
+```
+
+## Deployment Automation
+
+### Deployment Scripts
+```python
+# scripts/deploy_agents.py
+import asyncio
+import argparse
+from pathlib import Path
+from typing import List, Dict, Any
+
+class AgentDeployer:
+    def __init__(self, config_manager: ConfigurationManager):
+        self.config_manager = config_manager
+        self.deployment_log: List[Dict[str, Any]] = []
+    
+    async def deploy_agent_to_systems(
+        self,
+        agent_config: Dict[str, Any],
+        target_systems: List[str],
+        dry_run: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Deploy agent to multiple systems."""
+        results = []
+        
+        for system_id in target_systems:
+            system_config = self.config_manager.load_system_config(system_id)
+            if not system_config:
+                results.append({
+                    "system": system_id,
+                    "status": "error",
+                    "message": f"System configuration not found: {system_id}"
+                })
+                continue
+            
+            if dry_run:
+                results.append({
+                    "system": system_id,
+                    "status": "dry_run",
+                    "message": f"Would deploy agent '{agent_config['name']}' to {system_id}"
+                })
+            else:
+                try:
+                    async with InterSystemClient() as client:
+                        result = await client.deploy_agent(
+                            system_config.base_url,
+                            agent_config
+                        )
+                        results.append({
+                            "system": system_id,
+                            "status": "success" if result["success"] else "error",
+                            "message": result.get("data", {}).get("message", "Unknown error"),
+                            "details": result
+                        })
+                except Exception as e:
+                    results.append({
+                        "system": system_id,
+                        "status": "error",
+                        "message": str(e)
+                    })
+        
+        self.deployment_log.extend(results)
+        return results
+    
+    async def rollback_deployment(
+        self,
+        agent_name: str,
+        target_systems: List[str]
+    ) -> List[Dict[str, Any]]:
+        """Rollback agent deployment from systems."""
+        results = []
+        
+        for system_id in target_systems:
+            system_config = self.config_manager.load_system_config(system_id)
+            if not system_config:
+                continue
+            
+            try:
+                async with InterSystemClient() as client:
+                    result = await client.delete_agent(
+                        system_config.base_url,
+                        agent_name
+                    )
+                    results.append({
+                        "system": system_id,
+                        "status": "success" if result["success"] else "error",
+                        "message": f"Rollback of agent '{agent_name}'",
+                        "details": result
+                    })
+            except Exception as e:
+                results.append({
+                    "system": system_id,
+                    "status": "error",
+                    "message": str(e)
+                })
+        
+        return results
+
+async def main():
+    parser = argparse.ArgumentParser(description="Deploy agents to multiple systems")
+    parser.add_argument("--agent-config", required=True, help="Path to agent configuration file")
+    parser.add_argument("--systems", required=True, help="Comma-separated list of target systems")
+    parser.add_argument("--dry-run", action="store_true", help="Perform dry run without actual deployment")
+    parser.add_argument("--rollback", action="store_true", help="Rollback deployment instead of deploying")
+    
+    args = parser.parse_args()
+    
+    # Load agent configuration
+    with open(args.agent_config, 'r') as f:
+        agent_config = json.load(f)
+    
+    target_systems = [s.strip() for s in args.systems.split(",")]
+    
+    config_manager = ConfigurationManager()
+    deployer = AgentDeployer(config_manager)
+    
+    if args.rollback:
+        results = await deployer.rollback_deployment(agent_config["name"], target_systems)
+    else:
+        results = await deployer.deploy_agent_to_systems(agent_config, target_systems, args.dry_run)
+    
+    # Print results
+    for result in results:
+        status_icon = "✅" if result["status"] == "success" else "❌"
+        print(f"{status_icon} {result['system']}: {result['message']}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## Monitoring and Health Checks
+
+### System Health Monitor
+```python
+import asyncio
+import time
+from typing import Dict, List, Any
+
+class SystemHealthMonitor:
+    def __init__(self, multi_system_manager: MultiSystemAgentManager):
+        self.manager = multi_system_manager
+        self.health_checks: Dict[str, HealthCheckResult] = {}
+        self.monitoring_active = False
+    
+    async def start_monitoring(self, check_interval: int = 60):
+        """Start continuous health monitoring."""
+        self.monitoring_active = True
+        
+        while self.monitoring_active:
+            await self.perform_health_checks()
+            await asyncio.sleep(check_interval)
+    
+    async def stop_monitoring(self):
+        """Stop health monitoring."""
+        self.monitoring_active = False
+    
+    async def perform_health_checks(self):
+        """Perform health checks on all systems."""
+        tasks = []
+        
+        for system_id, system_registry in self.manager.systems.items():
+            task = asyncio.create_task(self._check_system_health(system_id, system_registry))
+            tasks.append(task)
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for system_id, result in zip(self.manager.systems.keys(), results):
+            if isinstance(result, Exception):
+                self.health_checks[system_id] = HealthCheckResult(
+                    system_id=system_id,
+                    status="error",
+                    error=str(result),
+                    timestamp=time.time()
+                )
+            else:
+                self.health_checks[system_id] = result
+    
+    async def _check_system_health(self, system_id: str, system_registry: SystemRegistry) -> HealthCheckResult:
+        """Check health of a specific system."""
+        try:
+            async with InterSystemClient() as client:
+                health_data = await client.health_check(system_registry.config.base_url)
+                
+                return HealthCheckResult(
+                    system_id=system_id,
+                    status=health_data["status"],
+                    response_time=health_data.get("response_time"),
+                    data=health_data.get("data"),
+                    timestamp=time.time()
+                )
+        except Exception as e:
+            return HealthCheckResult(
+                system_id=system_id,
+                status="error",
+                error=str(e),
+                timestamp=time.time()
+            )
+    
+    def get_system_status(self, system_id: str) -> Optional[HealthCheckResult]:
+        """Get current status of a system."""
+        return self.health_checks.get(system_id)
+    
+    def get_all_system_statuses(self) -> Dict[str, HealthCheckResult]:
+        """Get status of all systems."""
+        return self.health_checks.copy()
+    
+    def get_unhealthy_systems(self) -> List[str]:
+        """Get list of unhealthy systems."""
+        return [
+            system_id for system_id, result in self.health_checks.items()
+            if result.status != "healthy"
+        ]
+
+class HealthCheckResult:
+    def __init__(
+        self,
+        system_id: str,
+        status: str,
+        timestamp: float,
+        response_time: Optional[str] = None,
+        data: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None
+    ):
+        self.system_id = system_id
+        self.status = status
+        self.timestamp = timestamp
+        self.response_time = response_time
+        self.data = data
+        self.error = error
+```
+
+## Frontend Multi-System Management
+
+### System Management Dashboard
+```typescript
+// components/SystemManagementDashboard.tsx
+import { useState, useEffect } from 'react';
+import { Server, Globe, Activity, Settings } from 'lucide-react';
+import { Card } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { SystemConfigForm } from './SystemConfigForm';
+import { useSystemManager } from '@/hooks/useSystemManager';
+
+interface SystemStatus {
+  systemId: string;
+  name: string;
+  environment: string;
+  status: 'healthy' | 'unhealthy' | 'error';
+  activeAgents: number;
+  activeConversations: number;
+  lastHealthCheck: string;
+  responseTime?: string;
+}
+
+export function SystemManagementDashboard() {
+  const { systems, loading, error, createSystem, updateSystem, deleteSystem } = useSystemManager();
+  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [editingSystem, setEditingSystem] = useState<SystemConfig | null>(null);
+  const [systemStatuses, setSystemStatuses] = useState<SystemStatus[]>([]);
+
+  useEffect(() => {
+    // Fetch system statuses
+    const fetchStatuses = async () => {
+      try {
+        const response = await fetch('/api/v1/systems/status');
+        const data = await response.json();
+        setSystemStatuses(data.systems);
+      } catch (error) {
+        console.error('Failed to fetch system statuses:', error);
+      }
+    };
+
+    fetchStatuses();
+    const interval = setInterval(fetchStatuses, 30000); // Update every 30 seconds
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'healthy': return 'bg-green-100 text-green-800';
+      case 'unhealthy': return 'bg-yellow-100 text-yellow-800';
+      case 'error': return 'bg-red-100 text-red-800';
+      default: return 'bg-gray-100 text-gray-800';
+    }
+  };
+
+  const handleCreateSystem = async (config: SystemConfig) => {
+    await createSystem(config);
+    setShowCreateForm(false);
+  };
+
+  const handleUpdateSystem = async (updates: Partial<SystemConfig>) => {
+    if (editingSystem) {
+      await updateSystem(editingSystem.systemId, updates);
+      setEditingSystem(null);
+    }
+  };
+
+  const handleDeleteSystem = async (systemId: string) => {
+    if (confirm(`Are you sure you want to delete system "${systemId}"?`)) {
+      await deleteSystem(systemId);
+    }
+  };
+
+  if (loading) {
+    return <div className="flex justify-center p-8">Loading systems...</div>;
+  }
+
+  if (error) {
+    return <div className="text-red-500 p-4">Error: {error}</div>;
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-bold">System Management</h2>
+        <Button onClick={() => setShowCreateForm(true)}>
+          <Server className="w-4 h-4 mr-2" />
+          Add System
+        </Button>
+      </div>
+
+      {showCreateForm && (
+        <Card className="p-6">
+          <h3 className="text-lg font-semibold mb-4">Add New System</h3>
+          <SystemConfigForm
+            onSave={handleCreateSystem}
+            onCancel={() => setShowCreateForm(false)}
+          />
+        </Card>
+      )}
+
+      {editingSystem && (
+        <Card className="p-6">
+          <h3 className="text-lg font-semibold mb-4">Edit System: {editingSystem.name}</h3>
+          <SystemConfigForm
+            system={editingSystem}
+            onSave={handleUpdateSystem}
+            onCancel={() => setEditingSystem(null)}
+          />
+        </Card>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {systems.map((system) => {
+          const status = systemStatuses.find(s => s.systemId === system.systemId);
+          
+          return (
+            <Card key={system.systemId} className="p-4">
+              <div className="flex justify-between items-start mb-3">
+                <div>
+                  <h3 className="font-semibold text-lg">{system.name}</h3>
+                  <p className="text-gray-600 text-sm">{system.baseUrl}</p>
+                </div>
+                <Badge className={getStatusColor(status?.status || 'unknown')}>
+                  {status?.status || 'Unknown'}
+                </Badge>
+              </div>
+
+              <div className="space-y-2 mb-4">
+                <div className="flex justify-between text-sm">
+                  <span>Environment:</span>
+                  <span className="font-mono">{system.environment}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span>Active Agents:</span>
+                  <span>{status?.activeAgents || 0}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span>Conversations:</span>
+                  <span>{status?.activeConversations || 0}</span>
+                </div>
+                {status?.responseTime && (
+                  <div className="flex justify-between text-sm">
+                    <span>Response Time:</span>
+                    <span>{status.responseTime}</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex space-x-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setEditingSystem(system)}
+                >
+                  <Settings className="w-4 h-4" />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => handleDeleteSystem(system.systemId)}
+                  className="text-red-600 hover:text-red-700"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </Button>
+              </div>
+            </Card>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+```
+
+## Docker and Kubernetes Deployment
+
+### Docker Compose for Multi-System
+```yaml
+# docker-compose.multi-system.yml
+version: '3.8'
+
+services:
+  # Global Agent Manager
+  global-manager:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=production
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - ./configs:/app/configs
+    networks:
+      - agent-network
+
+  # System 1 - US East
+  system-us-east:
+    build: .
+    ports:
+      - "8001:8000"
+    environment:
+      - ENVIRONMENT=production
+      - SYSTEM_ID=us-east-1
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - ./configs:/app/configs
+    networks:
+      - agent-network
+
+  # System 2 - US West
+  system-us-west:
+    build: .
+    ports:
+      - "8002:8000"
+    environment:
+      - ENVIRONMENT=production
+      - SYSTEM_ID=us-west-1
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - ./configs:/app/configs
+    networks:
+      - agent-network
+
+  # System 3 - Europe
+  system-europe:
+    build: .
+    ports:
+      - "8003:8000"
+    environment:
+      - ENVIRONMENT=production
+      - SYSTEM_ID=europe-1
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - ./configs:/app/configs
+    networks:
+      - agent-network
+
+  # Frontend
+  frontend:
+    build: ./ui
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - global-manager
+    networks:
+      - agent-network
+
+  # Redis for caching and session storage
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - agent-network
+
+  # PostgreSQL for persistent storage
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=agent_management
+      - POSTGRES_USER=agent_user
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - agent-network
+
+  # Nginx load balancer
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+      - ./ssl:/etc/nginx/ssl
+    depends_on:
+      - global-manager
+      - system-us-east
+      - system-us-west
+      - system-europe
+    networks:
+      - agent-network
+
+volumes:
+  redis-data:
+  postgres-data:
+
+networks:
+  agent-network:
+    driver: bridge
+```
+
+### Kubernetes Deployment
+```yaml
+# k8s/agent-management.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-management-config
+data:
+  config.yaml: |
+    systems:
+      us-east-1:
+        name: "US East"
+        environment: "production"
+        base_url: "https://us-east-1.agents.example.com"
+        region: "us-east-1"
+        priority: 1
+      us-west-1:
+        name: "US West"
+        environment: "production"
+        base_url: "https://us-west-1.agents.example.com"
+        region: "us-west-1"
+        priority: 2
+      europe-1:
+        name: "Europe"
+        environment: "production"
+        base_url: "https://europe-1.agents.example.com"
+        region: "eu-west-1"
+        priority: 3
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: global-agent-manager
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: global-agent-manager
+  template:
+    metadata:
+      labels:
+        app: global-agent-manager
+    spec:
+      containers:
+      - name: agent-manager
+        image: agent-management:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: ENVIRONMENT
+          value: "production"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: openai-secret
+              key: api-key
+        - name: REDIS_URL
+          value: "redis://redis-service:6379"
+        - name: POSTGRES_URL
+          value: "postgresql://agent_user:$(POSTGRES_PASSWORD)@postgres-service:5432/agent_management"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: password
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/configs
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: config-volume
+        configMap:
+          name: agent-management-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: global-agent-manager-service
+spec:
+  selector:
+    app: global-agent-manager
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8000
+  type: LoadBalancer
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agent-management-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  tls:
+  - hosts:
+    - agents.example.com
+    secretName: agent-tls-secret
+  rules:
+  - host: agents.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: global-agent-manager-service
+            port:
+              number: 80
